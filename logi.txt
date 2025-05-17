@@ -1,0 +1,57 @@
+def verify_watermark(self):
+    """增强版水印验证方法"""
+    owner_info = self.verify_owner_edit.toPlainText()
+    if not owner_info:
+        QMessageBox.warning(self, "Warning", self.tr("no_owner_info"))
+        return
+
+    try:
+        # 情况1: 模型已有水印
+        if self.watermark_system.watermark_key:
+            salt, stored_key = self.watermark_system.watermark_key
+
+            # 从模型提取水印
+            extracted_key = self.watermark_system.extract_watermark_whitebox()
+
+            # 验证提取的水印是否与存储的一致
+            stored_match = extracted_key == stored_key[:32]
+
+            # 验证所有者信息是否匹配
+            regenerated_key = hashlib.pbkdf2_hmac('sha256',
+                                                owner_info.encode(),
+                                                salt.encode(),
+                                                100000).hex()[:32]
+            owner_match = regenerated_key == stored_key[:32]
+
+            if stored_match and owner_match:
+                result = self.tr("verify_success")
+            else:
+                result = self.tr("verify_fail")
+
+            # 显示详细比对信息
+            msg = f"""
+            {result}
+
+            [Stored Key]    : {stored_key[:16]}...
+            [Extracted Key] : {extracted_key[:16]}...
+            [Regenerated Key]: {regenerated_key[:16]}...
+
+            Stored == Extracted : {'✅' if stored_match else '❌'}
+            Stored == Regenerated: {'✅' if owner_match else '❌'}
+            """
+            self.verify_result.setText(msg)
+
+        # 情况2: 模型无水印，但可以重新生成验证
+        else:
+            # 重新生成水印用于比对
+            salt, new_key = self.watermark_system.generate_watermark(owner_info)
+            msg = f"""
+            {self.tr("no_watermark")}
+
+            {self.tr("regen_watermark")}:
+            [New Key]: {new_key[:16]}...
+            """
+            self.verify_result.setText(msg)
+
+    except Exception as e:
+        self.log_message(f"Verification error: {str(e)}")

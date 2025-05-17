@@ -1,0 +1,382 @@
+# # _*_ conding : utf-8 _*_
+# # @Time : 2025/4/9 14:27
+# # @Author : yang_4_ever
+# # @File : watermark_system
+# # @Project : FinalWMsys
+# import torch
+# import torch.nn as nn
+# from torchvision import models
+# import hashlib
+# import numpy as np
+# from PIL import Image
+# import torchvision.transforms as transforms
+# from torch.utils.data import Dataset, DataLoader
+# import random
+# import os
+# import time
+# import threading
+# import json
+#
+# class ModelWatermarkSystem:
+#     def __init__(self, num_classes=4, device='cuda' if torch.cuda.is_available() else 'cpu'):
+#         self.device = device
+#         self.num_classes = num_classes
+#         self.model = None
+#         self.watermark = None
+#         self.trigger_set = None
+#         self.watermark_layer = 'layer4'
+#         self.watermark_key = None
+#         self.test_loader = None
+#         self.initialize_model()
+#
+#     def calculate_watermark_capacity(self):
+#         """计算目标层可嵌入的最大信息量"""
+#         target_layer = None
+#         for name, module in self.model.net.named_modules():
+#             if name == self.watermark_layer:
+#                 target_layer = module
+#                 break
+#
+#         if target_layer is None:
+#             return 0
+#
+#         capacity = 0
+#         for param in target_layer.parameters():
+#             if len(param.shape) == 4:
+#                 capacity += param.shape[0]
+#         return capacity
+#
+#     def start_performance_monitoring(self, interval=5):
+#         """启动性能监控线程"""
+#         def monitor():
+#             while self.monitoring_active:
+#                 acc = self.evaluate_accuracy()
+#                 start_time = time.time()
+#                 self.model(torch.rand(1, 3, 224, 224).to(self.device))
+#                 inference_time = time.time() - start_time
+#                 self.accuracy_signal.emit(
+#                     f"Accuracy: {acc}\nInference: {inference_time:.2f}s\n"
+#                     f"GPU Mem: {torch.cuda.memory_allocated() / 1e6:.1f}MB"
+#                 )
+#                 time.sleep(interval)
+#
+#         self.monitoring_active = True
+#         threading.Thread(target=monitor, daemon=True).start()
+#
+#     def save_model(self, file_path=None):
+#         """保存模型为另存为方式，不覆盖原文件"""
+#         if file_path is None:
+#             return "No file path provided"
+#
+#         if not file_path.lower().endswith('.pth'):
+#             file_path += '.pth'
+#
+#         # 检查文件是否已存在，如果存在则添加时间戳
+#         if os.path.exists(file_path):
+#             base, ext = os.path.splitext(file_path)
+#             timestamp = time.strftime("%Y%m%d_%H%M%S")
+#             file_path = f"{base}_{timestamp}{ext}"
+#
+#         save_data = {
+#             'model_state': self.model.state_dict(),
+#             'watermark_salt': self.watermark_key[0],  # 存储盐值
+#             'watermark_hash': self.watermark_key[1],  # 存储密钥
+#             'system_version': '1.0'
+#         }
+#         torch.save(save_data, file_path)
+#         return f"Model saved to new file: {file_path} (with salt)"
+#
+#     def load_model(self, file_path):
+#         """加载模型时，恢复盐值"""
+#         checkpoint = torch.load(file_path)
+#         self.watermark_key = (
+#             checkpoint['watermark_salt'],  # 恢复盐值
+#             checkpoint['watermark_hash']  # 恢复密钥
+#         )
+#         self.model.load_state_dict(checkpoint['model_state'])
+#         return f"Model loaded from {file_path} (salt restored)"
+#
+#     def initialize_model(self):
+#         try:
+#             self.base_model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+#         except AttributeError:
+#             try:
+#                 self.base_model = models.resnet50(pretrained=True)
+#             except:
+#                 self.base_model = models.resnet50()
+#                 print("Warning: Could not load pretrained weights")
+#
+#         num_ftrs = self.base_model.fc.in_features
+#         self.base_model.fc = nn.Linear(num_ftrs, self.num_classes)
+#         self.model = self._create_model()
+#         self.model.to(self.device)
+#
+#     def evaluate_accuracy(self):
+#         if not self.test_loader:
+#             return "No test dataset loaded"
+#
+#         correct = 0
+#         total = 0
+#         with torch.no_grad():
+#             for data in self.test_loader:
+#                 inputs, labels = data
+#                 outputs = self.model(inputs)
+#                 _, predicted = torch.max(outputs.data, 1)
+#                 total += labels.size(0)
+#                 correct += (predicted == labels).sum().item()
+#
+#         accuracy = 100 * correct / total
+#         return f"Accuracy: {accuracy:.2f}%"
+#
+#     def _create_model(self):
+#         class WatermarkModel(nn.Module):
+#             def __init__(self, base_model):
+#                 super(WatermarkModel, self).__init__()
+#                 self.net = base_model
+#                 self.softmax = nn.Softmax(dim=1)
+#
+#             def forward(self, x):
+#                 x = self.net(x)
+#                 x = self.softmax(x)
+#                 return x
+#
+#         return WatermarkModel(self.base_model)
+#
+#     def load_pretrained_model(self, path):
+#         try:
+#             checkpoint = torch.load(path, map_location=self.device)
+#             self.initialize_model()
+#             model_dict = self.model.state_dict()
+#             pretrained_dict = {k: v for k, v in checkpoint.items()
+#                              if k in model_dict and model_dict[k].shape == v.shape}
+#             model_dict.update(pretrained_dict)
+#             self.model.load_state_dict(model_dict, strict=False)
+#             return f"Pretrained model loaded from {path}"
+#         except Exception as e:
+#             return f"Error loading pretrained model: {str(e)}"
+#
+#     def embed_watermark_whitebox(self, strength=0.5):  # 默认强度提高到0.5
+#         """增强版水印嵌入函数，带调试日志"""
+#         if self.watermark_key is None:
+#             raise ValueError("❌ 必须先调用generate_watermark生成密钥")
+#
+#         salt, key = self.watermark_key
+#         print(f"🔑 正在嵌入密钥（前8位）: {key[:8]}...")
+#
+#         # 1. 定位目标参数层（必须是具体的卷积层）
+#         target_param = None
+#         for name, param in self.model.net.named_parameters():
+#             if name == "net.layer4.2.conv2.weight":  # ResNet50的特定层
+#                 target_param = param
+#                 break
+#
+#         if target_param is None:
+#             raise ValueError("❌ 找不到目标参数层！请检查模型结构")
+#
+#         # 2. 检查参数维度是否足够
+#         if target_param.shape[0] < 32:
+#             raise ValueError(f"❌ 参数只有{target_param.shape[0]}个通道，至少需要32个")
+#
+#         # 3. 将密钥转换为二进制序列（每个hex字符转4bit）
+#         binary_key = ''.join([f"{int(c, 16):04b}" for c in key])
+#         print(f"🔢 密钥二进制形式（前16bit）: {binary_key[:16]}...")
+#
+#         # 4. 嵌入过程（带调试日志）
+#         with torch.no_grad():
+#             original_values = []
+#             modified_values = []
+#             for i in range(32):
+#                 original_val = target_param[i, 0, 0, 0].item()
+#                 bit = int(binary_key[i])  # 取当前bit（0或1）
+#
+#                 # 核心修改逻辑：用符号表示bit（更鲁棒）
+#                 new_val = original_val + strength * (1 if bit else -1)
+#                 target_param[i, 0, 0, 0] = new_val
+#
+#                 original_values.append(original_val)
+#                 modified_values.append(new_val)
+#
+#         # 5. 打印调试信息
+#         print("=== 嵌入调试信息 ===")
+#         for i in range(5):  # 只打印前5个示例
+#             print(f"位置[{i},0,0,0]: {original_values[i]:.6f} → {modified_values[i]:.6f}")
+#         print("...（其余省略）")
+#
+#         return f"✅ 水印已嵌入到 {name} 层（强度={strength}）"
+#
+#     def extract_watermark_whitebox(self):
+#         """增强版水印提取函数，带错误检查和日志"""
+#         try:
+#             # 1. 定位目标参数层（必须与嵌入时完全一致！）
+#             target_param = None
+#             for name, param in self.model.net.named_parameters():
+#                 if name == "net.layer4.2.conv2.weight":  # 必须与嵌入层相同
+#                     target_param = param
+#                     break
+#
+#             if target_param is None:
+#                 raise ValueError("❌ 提取失败：未找到目标参数层！")
+#
+#             # 2. 检查参数维度
+#             if target_param.shape[0] < 32:
+#                 raise ValueError(f"❌ 参数只有{target_param.shape[0]}个通道，需要至少32个")
+#
+#             # 3. 提取二进制序列
+#             binary_str = []
+#             with torch.no_grad():
+#                 print("=== 开始提取 ===")
+#                 for i in range(32):
+#                     val = target_param[i, 0, 0, 0].item()
+#                     bit = '1' if val > 0 else '0'  # 根据符号判断bit
+#                     binary_str.append(bit)
+#                     if i < 5:  # 打印前5个值的调试信息
+#                         print(f"位置[{i},0,0,0] = {val:.6f} → bit {bit}")
+#
+#             # 4. 二进制转16进制
+#             hex_key = ""
+#             for i in range(0, 32, 4):
+#                 nibble = ''.join(binary_str[i:i + 4])
+#                 hex_char = f"{int(nibble, 2):x}"  # 转为小写hex
+#                 hex_key += hex_char
+#                 print(f"二进制组 {nibble} → hex '{hex_char}'")
+#
+#             print(f"最终提取结果: {hex_key}")
+#             return hex_key
+#
+#         except Exception as e:
+#             print(f"‼️ 致命错误：{str(e)}")
+#             print("⚠️ 请检查：")
+#             print("1. 是否先调用了embed_watermark_whitebox()？")
+#             print("2. 模型结构是否包含net.layer4.2.conv2.weight层？")
+#             print("3. 嵌入时的strength参数是否≥0.5？")
+#             raise
+#
+#     # def embed_watermark_whitebox(self, strength=0.1):
+#     #     if self.watermark_key is None:
+#     #         raise ValueError("Watermark key not generated")
+#     #
+#     #     salt, key = self.watermark_key
+#     #     # 只使用key部分进行嵌入，不使用salt
+#     #     watermark_values = [int(c, 16) / 15.0 for c in key[:32]]  # 归一化到[0,1]
+#     #
+#     #     target_layer = None
+#     #     for name, module in self.model.net.named_modules():
+#     #         if name == self.watermark_layer:
+#     #             target_layer = module
+#     #             break
+#     #
+#     #     if target_layer is None:
+#     #         raise ValueError(f"Layer {self.watermark_layer} not found")
+#     #
+#     #     with torch.no_grad():
+#     #         for param in target_layer.parameters():
+#     #             if len(param.shape) == 4:  # 卷积层参数
+#     #                 for i in range(min(len(watermark_values), param.shape[0])):
+#     #                     # 使用更稳定的嵌入方式
+#     #                     param[i, 0, 0, 0] = watermark_values[i] * strength + param[i, 0, 0, 0] * (1 - strength)
+#     #                 break  # 只修改第一个符合条件的参数
+#     #
+#     #     return f"White-box watermark embedded in {self.watermark_layer} layer"
+#     #
+#     # def extract_watermark_whitebox(self):
+#     #     target_layer = None
+#     #     for name, module in self.model.net.named_modules():
+#     #         if name == self.watermark_layer:
+#     #             target_layer = module
+#     #             break
+#     #
+#     #     if target_layer is None:
+#     #         raise ValueError(f"Layer {self.watermark_layer} not found")
+#     #
+#     #     extracted_values = []
+#     #     with torch.no_grad():
+#     #         for param in target_layer.parameters():
+#     #             if len(param.shape) == 4:  # 卷积层参数
+#     #                 for i in range(32):  # 提取32个值
+#     #                     if i < param.shape[0]:
+#     #                         # 更精确的反向计算
+#     #                         val = round(param[i, 0, 0, 0].item() * 15)
+#     #                         extracted_values.append(max(0, min(15, val)))  # 限制在0-15范围
+#     #                     else:
+#     #                         extracted_values.append(0)
+#     #                 break  # 只从第一个符合条件的参数提取
+#     #
+#     #     # 转换为16进制字符串
+#     #     extracted_hex = ''.join([hex(int(v))[2:] for v in extracted_values])
+#     #     return extracted_hex[:32]
+#
+#     def generate_trigger_set(self, size=100):
+#         """生成用于验证水印的触发图像集"""
+#         transform = transforms.Compose([
+#             transforms.ToTensor(),
+#             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+#         ])
+#
+#         self.trigger_set = []
+#         for _ in range(size):
+#             img = torch.rand(3, 224, 224)
+#             label = torch.tensor([1])
+#             self.trigger_set.append((transform(img), label))
+#         return self.trigger_set
+#
+#     def generate_watermark(self, owner_info):
+#         """生成固定水印密钥（相同owner_info始终生成相同key）"""
+#         # 用所有者信息生成固定盐值（SHA256哈希后取前32字符）
+#         salt = hashlib.sha256(owner_info.encode()).hexdigest()[:32]
+#
+#         # 用固定盐值生成密钥
+#         key = hashlib.pbkdf2_hmac(
+#             'sha256',
+#             owner_info.encode(),
+#             salt.encode(),  # 固定盐值
+#             100000  # 迭代次数
+#         ).hex()[:32]  # 固定截取32字符
+#
+#         self.watermark_key = (salt, key)
+#         return key
+#
+#     def verify_watermark(self, extracted_key):
+#         if not self.watermark_key:
+#             return False
+#         salt, original_key = self.watermark_key
+#         # 允许部分匹配（前16字符）
+#         return extracted_key.startswith(original_key[:16])
+#
+#     # def verify_watermark(self, extracted_key):
+#     #     """验证提取的水印是否匹配"""
+#     #     if self.watermark_key is None:
+#     #         return False
+#     #     salt, original_key = self.watermark_key
+#     #     # 比较完整的32字符密钥
+#     #     return extracted_key == original_key[:32]
+#
+#     def verify_watermark_with_owner(self, owner_info):
+#         """验证水印（返回匹配结果和详细信息）"""
+#         try:
+#             if not self.watermark_key:
+#                 return False, "No watermark key available"
+#
+#             salt, stored_key = self.watermark_key
+#             # 重新生成密钥用于验证
+#             regenerated_key = hashlib.pbkdf2_hmac(
+#                 'sha256',
+#                 owner_info.encode(),
+#                 salt.encode(),
+#                 100000
+#             ).hex()[:32]
+#
+#             # 提取当前水印
+#             extracted_key = self.extract_watermark_whitebox()
+#
+#             # 构建详细验证信息
+#             verification_msg = f"""
+#             [Stored Key]    : {stored_key[:16]}...
+#             [Extracted Key] : {extracted_key[:16]}...
+#             [Regenerated Key]: {regenerated_key[:16]}...
+#             """
+#
+#             # 返回匹配结果和详细信息
+#             return extracted_key == regenerated_key, verification_msg
+#
+#         except Exception as e:
+#             return False, f"Verification error: {str(e)}"
