@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# 模型权重与运行产物（避免把大文件提交进版本库）
+*.pth
+*.pt
+runs/
+reports/
+*.log
+
+# 系统
+Thumbs.db
+desktop.ini
+
+# 数据集与样例图片（仓库只放代码，不托管 weather_photos 数据集）
+weather_photos/
+*.jpg
+*.jpeg
+
+# 运行日志与非代码备份
+logi.txt
+resources/el_wm.txt
+环境及包版本.txt

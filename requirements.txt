@@ -1,0 +1,11 @@
+# WMsys_enhanced 运行依赖（与 环境及包版本.txt 记录一致）
+# GPU / CUDA 11.8 版本请使用官方源安装：
+#   pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cu118
+# 仅 CPU 环境可改为：
+#   pip install torch==2.2.2 torchvision==0.17.2 PyQt5==5.15.11 numpy==1.26.3 pillow==11.0.0
+
+torch==2.2.2+cu118
+torchvision==0.17.2+cu118
+PyQt5==5.15.11
+numpy==1.26.3
+pillow==11.0.0

@@ -4,19 +4,64 @@
 # @File : gui
 # @Project : FinalWMsys
 
+from pathlib import Path
+
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                             QPushButton, QLabel, QTextEdit, QFileDialog, QMessageBox,
-                            QGroupBox, QComboBox, QSpinBox, QDoubleSpinBox, QDialog, QDialogButtonBox,QProgressBar)
+                            QGroupBox, QDoubleSpinBox, QDialog, QDialogButtonBox, QProgressBar)
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QIcon
-from watermark_system import ModelWatermarkSystem
-from utils import LANGUAGES
-import sys
-import os
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 import torch
-from torchvision import transforms
 import torchvision
+from torchvision import transforms
+
+from watermark_system import ModelWatermarkSystem, WatermarkError, set_global_seed
+from utils import LANGUAGES
+
+# 统一预处理：与 ResNet50(IMAGENET1K_V1) 权重期望的输入分布保持一致
+IMAGE_SIZE = 224
+RESIZE_SIZE = 256
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD = [0.229, 0.224, 0.225]
+EVAL_BATCH_SIZE = 16
+
+
+def project_root():
+    """项目根目录：基于本文件位置解析，而非当前工作目录。"""
+    return Path(__file__).resolve().parent
+
+
+def resources_dir():
+    return project_root() / "resources"
+
+
+def build_eval_transform():
+    """评估用 transform：Resize → CenterCrop → ToTensor → Normalize。"""
+    return transforms.Compose([
+        transforms.Resize(RESIZE_SIZE),
+        transforms.CenterCrop(IMAGE_SIZE),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+    ])
+
+
+def build_image_dataset(data_dir):
+    """构建 ImageFolder 数据集并做基本校验（空目录直接报错，不静默造数据）。"""
+    dataset = torchvision.datasets.ImageFolder(root=data_dir, transform=build_eval_transform())
+    if len(dataset) == 0:
+        raise WatermarkError("选择的目录中没有有效的图像数据")
+    return dataset
+
+
+def summarize_dataset(dataset):
+    """输出"类别数 / 总数 / 每类数量"，便于判断类别不均衡。"""
+    counts = {}
+    for _, index in dataset.samples:
+        name = dataset.classes[index]
+        counts[name] = counts.get(name, 0) + 1
+    detail = ", ".join(f"{name}:{counts[name]}" for name in dataset.classes)
+    return f"{len(dataset.classes)} 类 / {len(dataset)} 张（{detail}）"
 
 
 class HelpDialog(QDialog):
@@ -128,13 +173,18 @@ class WatermarkApp(QMainWindow):
             "model_ops_group": self.tr("model_ops"),
             "watermark_gen_group": self.tr("watermark_gen"),
             "whitebox_group": self.tr("whitebox"),
-            "verify_group": self.tr("watermark_verify")
+            "verify_group": self.tr("watermark_verify"),
+            "test_group": self.tr("performance_test")
         }
 
         for name, text in groups.items():
             widget = self.findChild(QGroupBox, name)
             if widget:
                 widget.setTitle(text)
+
+        # 分组标题标签：统一登记在 self.labels，避免切换语言后残留旧文案
+        for key, label in getattr(self, "labels", {}).items():
+            label.setText(f"{self.tr(key)}:")
 
         if hasattr(self, 'load_pretrained_btn'):
             self.load_pretrained_btn.setText(self.tr("load_pretrained"))
@@ -144,10 +194,18 @@ class WatermarkApp(QMainWindow):
             self.wb_embed_btn.setText(self.tr("embed_watermark"))
             self.wb_extract_btn.setText(self.tr("extract_watermark"))
             self.verify_btn.setText(self.tr("verify_watermark"))
+            self.run_tests_btn.setText(self.tr("run_tests"))
+            self.load_test_btn.setText(self.tr("load_test_data"))
 
         self.lang_btn.setText("中文" if self.current_lang == "en" else "EN")
         self.owner_info_edit.setPlaceholderText(self.tr("owner_placeholder"))
         self.verify_owner_edit.setPlaceholderText(self.tr("owner_placeholder"))
+        if hasattr(self, "owner_info_label"):
+            self.owner_info_label.setText(self.tr("owner_info"))
+        if hasattr(self, "strength_label"):
+            self.strength_label.setText(self.tr("embed_strength"))
+        if hasattr(self, "verify_hint_label"):
+            self.verify_hint_label.setText(self.tr("enter_owner_verify"))
 
     def tr(self, key):
         return LANGUAGES[self.current_lang].get(key, key)
@@ -158,6 +216,9 @@ class WatermarkApp(QMainWindow):
             item = self.left_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+
+        # 分组标题标签登记表：切换语言时统一刷新
+        self.labels = {}
 
         # 模型操作组
         model_group = QGroupBox()
@@ -180,8 +241,9 @@ class WatermarkApp(QMainWindow):
         self.load_btn = QPushButton(self.tr("load_model"))
         self.load_btn.clicked.connect(self.load_model)
 
+        self.labels["model_ops"] = QLabel(f"{self.tr('model_ops')}:")
         help_layout = QHBoxLayout()
-        help_layout.addWidget(QLabel(f"{self.tr('model_ops')}:"))
+        help_layout.addWidget(self.labels["model_ops"])
         help_layout.addWidget(help_btn)
         help_layout.addStretch()
         model_layout.addLayout(help_layout)
@@ -211,13 +273,15 @@ class WatermarkApp(QMainWindow):
         self.owner_info_edit.setPlaceholderText(self.tr("owner_placeholder"))
         self.owner_info_edit.setMaximumHeight(100)
 
+        self.labels["watermark_gen"] = QLabel(f"{self.tr('watermark_gen')}:")
         gen_help_layout = QHBoxLayout()
-        gen_help_layout.addWidget(QLabel(f"{self.tr('watermark_gen')}:"))
+        gen_help_layout.addWidget(self.labels["watermark_gen"])
         gen_help_layout.addWidget(gen_help_btn)
         gen_help_layout.addStretch()
         gen_layout.addLayout(gen_help_layout)
 
-        gen_layout.addWidget(QLabel(self.tr("owner_info")))
+        self.owner_info_label = QLabel(self.tr("owner_info"))
+        gen_layout.addWidget(self.owner_info_label)
         gen_layout.addWidget(self.owner_info_edit)
         gen_layout.addWidget(self.gen_btn)
         gen_group.setLayout(gen_layout)
@@ -246,13 +310,15 @@ class WatermarkApp(QMainWindow):
         self.wb_extract_btn = QPushButton(self.tr("extract_watermark"))
         self.wb_extract_btn.clicked.connect(self.extract_whitebox)
 
+        self.labels["whitebox"] = QLabel(f"{self.tr('whitebox')}:")
         wb_help_layout = QHBoxLayout()
-        wb_help_layout.addWidget(QLabel(f"{self.tr('whitebox')}:"))
+        wb_help_layout.addWidget(self.labels["whitebox"])
         wb_help_layout.addWidget(wb_help_btn)
         wb_help_layout.addStretch()
         wb_layout.addLayout(wb_help_layout)
 
-        wb_layout.addWidget(QLabel(self.tr("embed_strength")))
+        self.strength_label = QLabel(self.tr("embed_strength"))
+        wb_layout.addWidget(self.strength_label)
         wb_layout.addWidget(self.strength_spin)
         wb_layout.addWidget(self.wb_embed_btn)
         wb_layout.addWidget(self.wb_extract_btn)
@@ -262,6 +328,7 @@ class WatermarkApp(QMainWindow):
         self.left_layout.addStretch()
 
         test_group = QGroupBox(self.tr("performance_test"))
+        test_group.setObjectName("test_group")
         test_layout = QVBoxLayout()
 
         test_help_btn = QPushButton("ℹ️")
@@ -277,8 +344,9 @@ class WatermarkApp(QMainWindow):
         self.test_result = QTextEdit()
         self.test_result.setReadOnly(True)
 
+        self.labels["performance_test"] = QLabel(f"{self.tr('performance_test')}:")
         test_help_layout = QHBoxLayout()
-        test_help_layout.addWidget(QLabel(f"{self.tr('performance_test')}:"))
+        test_help_layout.addWidget(self.labels["performance_test"])
         test_help_layout.addWidget(test_help_btn)
         test_help_layout.addStretch()
         test_layout.addLayout(test_help_layout)
@@ -308,7 +376,8 @@ class WatermarkApp(QMainWindow):
         self.verify_result.setWordWrap(True)
         self.verify_result.setAlignment(Qt.AlignCenter)
 
-        verify_layout.addWidget(QLabel(self.tr("enter_owner_verify")))
+        self.verify_hint_label = QLabel(self.tr("enter_owner_verify"))
+        verify_layout.addWidget(self.verify_hint_label)
         verify_layout.addWidget(self.verify_owner_edit)
         verify_layout.addWidget(self.verify_btn)
         verify_layout.addWidget(self.verify_result)
@@ -369,10 +438,12 @@ class WatermarkApp(QMainWindow):
             extracted_key = self.watermark_system.extract_watermark_whitebox()
             salt, original_key = self.watermark_system.watermark_key
             match = self.watermark_system.verify_watermark(extracted_key)
+            accuracy = self.watermark_system.extraction_bit_accuracy(original_key)
 
             self.log_message(self.tr("original_key").format(original_key[:16]))
             self.log_message(self.tr("extracted_key").format(extracted_key[:16]))
             self.log_message(self.tr("watermark_match").format(match))
+            self.log_message(self.tr("extraction_bits").format(accuracy * 100))
             self.log_message("")
         except Exception as e:
             self.log_message(f"Error extracting watermark: {str(e)}")
@@ -444,204 +515,172 @@ class WatermarkApp(QMainWindow):
                 self.log_message(f"Error loading model: {str(e)}")
 
     def set_window_icon(self):
-        icon_path = os.path.join("resources", "wm.png")
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
+        icon_path = resources_dir() / "wm.png"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
 
     def run_performance_tests(self):
-        """执行性能测试的完整修复版本"""
-        try:
-            # 1. 前置检查
-            if not self.watermark_system.model:
-                QMessageBox.warning(self, "Warning", self.tr("no_model_loaded"))
-                return
+        """执行性能测试（P0：测试数据不可用即终止，指标语义改为比特一致率）。"""
+        if not self.watermark_system.model:
+            QMessageBox.warning(self, "Warning", self.tr("no_model_loaded"))
+            return
+        if not self.watermark_system.watermark_key:
+            QMessageBox.warning(self, "Warning", self.tr("no_key"))
+            return
 
-            # 2. 创建并显示进度对话框
-            progress_dialog = ProgressDialog(self.tr("running_tests"), self)
-            progress_dialog.show()
-            QApplication.processEvents()  # 立即显示对话框
+        set_global_seed(self.watermark_system.seed)
+
+        progress_dialog = ProgressDialog(self.tr("running_tests"), self)
+        progress_dialog.show()
+        QApplication.processEvents()  # 立即显示对话框
+
+        self.test_result.clear()
+        self.test_result.append("=== 开始性能测试 ===")
+        original_acc = None
+        ext_rate = None
+
+        try:
+            progress_dialog.update_progress(5, "正在加载测试数据...")
+            test_loader = self.get_test_loader()
+            if test_loader is None:
+                self.test_result.append("❌ 测试数据不可用，测试终止（不会用随机数据代替）")
+                QMessageBox.critical(self, "错误", self.tr("no_test_data"))
+                return
+            self.test_result.append("✓ 测试数据加载成功")
 
             try:
-                # 3. 初始化测试结果区域
-                self.test_result.clear()
-                self.test_result.append("=== 开始性能测试 ===")
-
-                # 4. 获取测试数据加载器（带错误处理）
-                test_loader = None
-                try:
-                    progress_dialog.update_progress(5, "正在加载测试数据...")
-                    test_loader = self.get_test_loader()
-                    if test_loader is None:
-                        raise ValueError("无法获取有效的测试数据加载器")
-                    self.test_result.append("✓ 测试数据加载成功")
-                except Exception as e:
-                    self.test_result.append(f"❌ 测试数据加载失败: {str(e)}")
-                    QMessageBox.critical(self, "错误", f"加载测试数据失败: {str(e)}")
+                progress_dialog.update_progress(20, "测试原始准确率...")
+                original_acc = self.watermark_system.evaluate_model(test_loader)
+                self.test_result.append(f"\n✓ 原始准确率: {original_acc:.2f}%")
+            except Exception as e:
+                self.test_result.append(f"\n❌ 原始准确率测试失败: {str(e)}")
+                if progress_dialog.is_cancelled():
                     return
 
-                # 5. 测试原始准确率
-                try:
-                    progress_dialog.update_progress(20, "测试原始准确率...")
-                    original_acc = self.watermark_system.evaluate_model(test_loader)
-                    self.test_result.append(f"\n✓ 原始准确率: {original_acc:.2f}%")
-                except Exception as e:
-                    self.test_result.append(f"\n❌ 原始准确率测试失败: {str(e)}")
-                    if progress_dialog.is_cancelled():
-                        return
-
-                # 6. 测试水印提取率
-                try:
-                    progress_dialog.update_progress(40, "测试水印提取率...")
-                    ext_rate = self.watermark_system.test_watermark_extraction() * 100
-                    self.test_result.append(f"✓ 水印提取成功率: {ext_rate:.2f}%")
-                except Exception as e:
-                    self.test_result.append(f"❌ 水印提取测试失败: {str(e)}")
-                    if progress_dialog.is_cancelled():
-                        return
-
-                # 7. 鲁棒性测试
-                robustness_results = []
-                attack_types = ['prune', 'noise', 'finetune']
-
-                for i, attack in enumerate(attack_types):
-                    if progress_dialog.is_cancelled():
-                        return
-
-                    progress = 50 + (i * 15)
-                    progress_dialog.update_progress(progress, f"正在进行{attack}测试...")
-
-                    try:
-                        result = self.watermark_system.robustness_test(
-                            test_loader,
-                            attack_types=[attack]
-                        )[0]  # 获取第一个结果
-
-                        robustness_results.append(result)
-                        self.test_result.append(
-                            f"\n✓ {attack}测试完成: "
-                            f"准确率={result['accuracy']:.2f}%, "
-                            f"提取率={result['extraction_rate'] * 100:.2f}%"
-                        )
-                    except Exception as e:
-                        self.test_result.append(f"\n❌ {attack}测试失败: {str(e)}")
-                        robustness_results.append({
-                            'attack_type': attack,
-                            'error': str(e)
-                        })
-
-                # 8. 显示最终结果
-                progress_dialog.update_progress(95, "生成测试报告...")
-                self.test_result.append("\n=== 测试结果汇总 ===")
-                self.test_result.append(f"1. 原始准确率: {original_acc:.2f}%")
-                self.test_result.append(f"2. 水印提取率: {ext_rate:.2f}%")
-
-                for result in robustness_results:
-                    if 'error' in result:
-                        self.test_result.append(
-                            f"3. {result['attack_type']}: 测试失败 ({result['error']})"
-                        )
-                    else:
-                        self.test_result.append(
-                            f"3. {result['attack_type']}: "
-                            f"准确率={result['accuracy']:.2f}%, "
-                            f"提取率={result['extraction_rate'] * 100:.2f}%"
-                        )
-
-                progress_dialog.update_progress(100, "测试完成！")
-                QMessageBox.information(self, "完成", "性能测试执行完毕")
-
+            try:
+                progress_dialog.update_progress(40, "测试水印比特一致率...")
+                ext_rate = self.watermark_system.extraction_bit_accuracy()
+                self.test_result.append(f"✓ 水印比特一致率: {ext_rate * 100:.2f}%")
             except Exception as e:
-                self.test_result.append(f"\n❌ 测试过程中发生严重错误: {str(e)}")
-                QMessageBox.critical(self, "错误", f"测试失败: {str(e)}")
+                self.test_result.append(f"❌ 水印提取测试失败: {str(e)}")
+                if progress_dialog.is_cancelled():
+                    return
 
-            finally:
-                self.watermark_system.test_loader = None  # 释放测试数据
-                torch.cuda.empty_cache()  # 清理GPU缓存
+            # 鲁棒性测试（robustness_test 内部逐项捕获异常并返回 error 字段）
+            robustness_results = []
+            attack_types = ['prune', 'noise', 'finetune']
+
+            for i, attack in enumerate(attack_types):
+                if progress_dialog.is_cancelled():
+                    return
+
+                progress_dialog.update_progress(50 + (i * 15), f"正在进行{attack}测试...")
+
+                result = self.watermark_system.robustness_test(
+                    test_loader,
+                    attack_types=[attack]
+                )[0]
+                robustness_results.append(result)
+
+                if 'error' in result:
+                    self.test_result.append(f"\n❌ {attack}测试失败: {result['error']}")
+                else:
+                    self.test_result.append(
+                        f"\n✓ {attack}测试完成: "
+                        f"准确率={result['accuracy']:.2f}%, "
+                        f"比特一致率={result['bit_accuracy'] * 100:.2f}%"
+                    )
+
+            progress_dialog.update_progress(95, "生成测试报告...")
+            self.test_result.append("\n=== 测试结果汇总 ===")
+            self.test_result.append(
+                "1. 原始准确率: 测试失败" if original_acc is None
+                else f"1. 原始准确率: {original_acc:.2f}%"
+            )
+            self.test_result.append(
+                "2. 水印比特一致率: 测试失败" if ext_rate is None
+                else f"2. 水印比特一致率: {ext_rate * 100:.2f}%"
+            )
+
+            for result in robustness_results:
+                if 'error' in result:
+                    self.test_result.append(
+                        f"3. {result['attack_type']}: 测试失败 ({result['error']})"
+                    )
+                else:
+                    self.test_result.append(
+                        f"3. {result['attack_type']}: "
+                        f"准确率={result['accuracy']:.2f}%, "
+                        f"比特一致率={result['bit_accuracy'] * 100:.2f}%"
+                    )
+
+            progress_dialog.update_progress(100, "测试完成！")
+            QMessageBox.information(self, "完成", "性能测试执行完毕")
 
         except Exception as e:
-            self.test_result.append(f"\n❌ 无法初始化测试: {str(e)}")
-            QMessageBox.critical(self, "错误", f"无法开始测试: {str(e)}")
+            self.test_result.append(f"\n❌ 测试过程中发生严重错误: {str(e)}")
+            QMessageBox.critical(self, "错误", f"测试失败: {str(e)}")
+
+        finally:
+            # 保留已加载的测试数据缓存（避免每次测试都要重新选择目录），只释放显存
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            progress_dialog.close()
 
     def get_test_loader(self):
-        """改进的测试数据加载方法"""
+        """获取测试数据加载器：优先复用已加载的数据，否则提示选择目录。
+
+        P0 修复：加载失败不再静默回退到随机数据（那会让所有指标失去意义）。
+        """
+        if self.watermark_system.test_loader is not None:
+            return self.watermark_system.test_loader
+
+        options = QFileDialog.Options()
+        data_dir = QFileDialog.getExistingDirectory(
+            self,
+            "选择测试数据集目录",
+            options=options
+        )
+        if not data_dir:
+            self.log_message(self.tr("no_dataset_dir"))
+            return None
+
         try:
-            # 1. 尝试使用已加载的数据
-            if hasattr(self.watermark_system, 'test_loader') and self.watermark_system.test_loader:
-                return self.watermark_system.test_loader
-
-            # 2. 提示用户选择数据集目录
-            options = QFileDialog.Options()
-            data_dir = QFileDialog.getExistingDirectory(
-                self,
-                "选择测试数据集目录",
-                options=options
-            )
-
-            if not data_dir:
-                raise ValueError("用户取消了数据目录选择")
-
-            if not os.path.exists(data_dir):
-                raise ValueError(f"目录不存在: {data_dir}")
-
-            # 3. 创建数据加载器
-            transform = transforms.Compose([
-                transforms.Resize(256),
-                transforms.CenterCrop(224),
-                transforms.ToTensor(),
-            ])
-
-            dataset = torchvision.datasets.ImageFolder(
-                root=data_dir,
-                transform=transform
-            )
-
-            if len(dataset) == 0:
-                raise ValueError("选择的目录中没有有效的图像数据")
-
-            loader = DataLoader(dataset, batch_size=8, shuffle=True)
-            self.watermark_system.test_loader = loader  # 缓存加载器
-            return loader
-
+            dataset = build_image_dataset(data_dir)
         except Exception as e:
-            self.log_message(f"加载测试数据错误: {str(e)}")
+            self.log_message(f"{self.tr('test_data_error')}: {str(e)}")
+            return None
 
-            # 4. 提供后备的随机数据
-            class RandomDataset(Dataset):
-                def __init__(self, size=100):
-                    self.data = torch.randn(size, 3, 224, 224)
-                    self.targets = torch.randint(0, 4, (size,))
+        info = summarize_dataset(dataset)
+        self.log_message(f"{self.tr('test_data_loaded')}: {data_dir}")
+        self.log_message(self.tr("test_dataset_info").format(info))
+        if len(dataset.classes) != self.watermark_system.num_classes:
+            warning = self.tr("class_mismatch").format(
+                len(dataset.classes), self.watermark_system.num_classes
+            )
+            self.log_message(warning)
+            QMessageBox.warning(self, self.tr("warning_title"), warning)
 
-                def __len__(self):
-                    return len(self.data)
-
-                def __getitem__(self, idx):
-                    return self.data[idx], self.targets[idx]
-
-            self.log_message("⚠️ 使用随机生成的数据作为后备")
-            return DataLoader(RandomDataset(), batch_size=8, shuffle=True)
+        # 评估集必须 shuffle=False，否则结果不可复现
+        loader = DataLoader(dataset, batch_size=EVAL_BATCH_SIZE, shuffle=False)
+        self.watermark_system.test_loader = loader
+        return loader
 
     def load_test_dataset(self):
         options = QFileDialog.Options()
         data_dir = QFileDialog.getExistingDirectory(self, "选择测试数据集目录", options=options)
-        if data_dir:
-            try:
-                transform = transforms.Compose([
-                    transforms.Resize(256),
-                    transforms.CenterCrop(224),
-                    transforms.ToTensor(),
-                ])
-
-                dataset = torchvision.datasets.ImageFolder(
-                    root=data_dir,
-                    transform=transform
-                )
-                self.watermark_system.test_loader = DataLoader(dataset, batch_size=16, shuffle=True)
-                self.log_message(f"测试数据集已加载: {data_dir}")
-            except Exception as e:
-                self.log_message(f"加载测试数据集错误: {str(e)}")
-
-    def load_custom_dataset(self, data_dir):
-        # 实现您的数据集加载逻辑（需自定义）
-        transform = transforms.Compose([transforms.ToTensor()])
-        dataset = torchvision.datasets.ImageFolder(data_dir, transform=transform)
-        return DataLoader(dataset, batch_size=16, shuffle=True)
+        if not data_dir:
+            return
+        try:
+            dataset = build_image_dataset(data_dir)
+            self.watermark_system.test_loader = DataLoader(
+                dataset, batch_size=EVAL_BATCH_SIZE, shuffle=False
+            )
+            self.log_message(f"{self.tr('test_data_loaded')}: {data_dir}")
+            self.log_message(self.tr("test_dataset_info").format(summarize_dataset(dataset)))
+            if len(dataset.classes) != self.watermark_system.num_classes:
+                self.log_message(self.tr("class_mismatch").format(
+                    len(dataset.classes), self.watermark_system.num_classes
+                ))
+        except Exception as e:
+            self.log_message(f"{self.tr('test_data_error')}: {str(e)}")
